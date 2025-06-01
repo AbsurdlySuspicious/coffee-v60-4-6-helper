@@ -1,9 +1,31 @@
 import argparse
 from decimal import Decimal
+import enum
+import re
+from typing import Any
 
 
 class Fatal(Exception):
     pass
+
+class SingleParamResult(int, enum.ReprEnum):
+    FoundSingle = enum.auto()
+    FoundMultiple = enum.auto()
+    FoundNone = enum.auto()
+
+def single_param(**kwargs) -> tuple[SingleParamResult, tuple[str, Any] | dict]:
+    defined = {}
+    for k, v in kwargs.items():
+        if v is None:
+            continue
+        defined[k] = v
+    match len(defined):
+        case 0:
+            return SingleParamResult.FoundNone, defined
+        case 1:
+            return SingleParamResult.FoundSingle, list(defined.items())[0]
+        case _:
+            return SingleParamResult.FoundMultiple, defined
 
 def cli_main():
     argp = argparse.ArgumentParser()
@@ -19,6 +41,8 @@ def cli_main():
                       help="seconds for one pour (depends on grind)")
     argp.add_argument("--ratio40", "-r", type=Decimal,
                       help="Acidity/sweetness ratio for 40% stage pours as decimal")
+    argp.add_argument("--ratio40-raw", "-R", type=str,
+                      help="--ratio40, but as grams: <1st pour grams>/?|?/<2nd port grams>")
     argp.add_argument("--pours60", "-p", type=int,
                       help="Pours count for 60% stage")
     args = argp.parse_args()
@@ -32,33 +56,32 @@ def cli_main():
 
     ratio = 15 if (r := args.ratio) is None else r
     pours60 = 3 if (r := args.pours60) is None else r
-    ratio40 = Decimal('0.5') if (r := args.ratio40) is None else round(r, 3)
     pour_time = args.pour_time
 
-    if not (0 < ratio40 < 1):
-        raise Fatal("Invalid ratio40", ratio40)
+    match single_param(ratio=args.ratio40, raw=args.ratio40_raw):
+        case SingleParamResult.FoundSingle, value:
+            ratio40_arg = value
+        case SingleParamResult.FoundMultiple, _:
+            raise Fatal("Should specify either -r or -R")
+        case SingleParamResult.FoundNone, _:
+            ratio40_arg = "ratio", Decimal("0.5")
+
     if pours60 > 3:
         raise Fatal("Should not be more than 3 pours in 60% stage")
     if pours60 < 1:
         raise Fatal("Should at least be 1 pour in 60% stage")
 
-    if args.coffee_g and args.water_g:
-        if not args.ratio_override:
-            raise Fatal("Can't set both coffee and water unless override")
-        raise NotImplemented
-    elif args.coffee_g:
-        args.water_g = _round(args.coffee_g * ratio)
-    elif args.water_g:
-        args.coffee_g = _round(args.water_g / ratio)
-    else:
-        raise Fatal("Should specify amount")
-
-    print(f"Coffee    : {args.coffee_g}g")
-    print(f"Water (t) : {args.water_g}g")
-    print(f"Ratio C/W : 1:{ratio}")
-    print(f"Ratio 40% : {ratio40}")
-    print(f"Pours 60% : {pours60}")
-    print()
+    match single_param(coffee=args.coffee_g, water=args.water_g):
+        case SingleParamResult.FoundMultiple, _:
+            if not args.ratio_override:
+                raise Fatal("Can't set both coffee and water unless override")
+            raise NotImplemented
+        case SingleParamResult.FoundSingle, ("coffee", value):
+            args.water_g = _round(value * ratio)
+        case SingleParamResult.FoundSingle, ("water", value):
+            args.coffee_g = _round(value / ratio)
+        case _:
+            raise Fatal("Should specify amount")
 
     total_acc = 0
     def print_row(i, to_pour, *, replace_text=None, no_pour_num=False):
@@ -74,10 +97,54 @@ def cli_main():
 
     stage40_water = args.water_g * Decimal('0.4')
     stage60_water = args.water_g - stage40_water
-    stage40_pour1 = _round(stage40_water * ratio40)
+    
+    def _ratio_raw_delta(g: str) -> Decimal:
+        return stage40_water - Decimal(g)
+
+    def _round_ratio40(ratio40_value: Decimal) -> Decimal:
+        return round(ratio40_value, 3)
+
+    match ratio40_arg:
+        case "ratio", value:
+            ratio40 = _round_ratio40(value)
+            if not (0 < value < 1):
+                raise Fatal("Invalid ratio40", ratio40)
+            stage40_pour1 = _round(stage40_water * ratio40)
+            stage40_pour2 = _round(stage40_water - stage40_pour1)
+        case "raw", value:
+            pat_sep = r"/"
+            pat_unk = r"[?*]"
+            pat_val = r"[\d.]+"
+            m = re.match(rf"({pat_val}){pat_sep}{pat_unk}|"
+                         rf"{pat_unk}{pat_sep}({pat_val})", value)
+            if m is None:
+                raise Fatal("Invalid -R syntax")
+            elif (g := m[1]) is not None:
+                delta = _ratio_raw_delta(g)
+                stage40_pour1 = _round(stage40_water - delta)
+                ratio40 = _round_ratio40(1 - (delta /stage40_water))
+            elif (g := m[2]) is not None:
+                delta = _ratio_raw_delta(g)
+                stage40_pour1 = _round(delta)
+                ratio40 = _round_ratio40(delta / stage40_water)
+            else:
+                raise ValueError
+            if stage40_pour1 >= stage40_water:
+                raise Fatal("Invalid -R proportions")
+        case _:
+            raise ValueError
+
     stage40_pour2 = _round(stage40_water - stage40_pour1)
+
     stage60_pourN = _round(stage60_water / pours60)
     stage60_pourL = stage60_water - (stage60_pourN * (pours60 - 1))
+
+    print(f"Coffee    : {args.coffee_g}g")
+    print(f"Water (t) : {args.water_g}g")
+    print(f"Ratio C/W : 1:{ratio}")
+    print(f"Ratio 40% : {ratio40}")
+    print(f"Pours 60% : {pours60}")
+    print()
 
     print_row(0, stage40_pour1)
     print_row(1, stage40_pour2)
