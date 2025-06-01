@@ -112,11 +112,12 @@ def cli_main():
             stage40_pour1 = _round(stage40_water * ratio40)
             stage40_pour2 = _round(stage40_water - stage40_pour1)
         case "raw", value:
-            pat_sep = r"/"
-            pat_unk = r"[?*]"
-            pat_val = r"[\d.]+"
-            m = re.match(rf"({pat_val}){pat_sep}{pat_unk}|"
-                         rf"{pat_unk}{pat_sep}({pat_val})", value)
+            pat_parts = (r"([\d.]+)", r"/", r"[?*]")
+            pat = r"|".join(
+                "".join(p) for p in
+                (pat_parts, reversed(pat_parts))
+            )
+            m = re.match(pat, value)
             if m is None:
                 raise Fatal("Invalid -R syntax")
             elif (g := m[1]) is not None:
